@@ -1,24 +1,146 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later
- * Copyright (C) 2024        Okda Networks
- *                           Amjad Daraiseh
- *                           Ali Aqrabawi
- */
+* Copyright (C) 2024        Okda Networks
+*                           Ali Aqrabawi
+*/
 
+#include "memory.h"
 #include "northbound.h"
-#include "bgp_nb.h"
+
+#include "bgpd/bgp_nb.h"
+#include "bgpd/bgpd.h"
+#include "bgpd/bgp_mplsvpn.h"
+#include "bgpd/bgp_fsm.h"
+#include "bgpd/bgp_addpath.h"
+#include "bgpd/bgp_updgrp.h"
+
+
+//int routing_control_plane_protocols_name_validate(
+//       struct nb_cb_create_args *args)
+//{
+//       const char *name;
+//
+//       name = yang_dnode_get_string(args->dnode, "./name");
+//       if (!strmatch(name, "bgp")) {
+//	       snprintf(args->errmsg, args->errmsg_len,
+//			"per vrf only one bgp instance is supported.");
+//	       return NB_ERR_VALIDATION;
+//       }
+//       return NB_OK;
+//}
+
 
 /*
- * XPath: /frr-routing:routing/control-plane-protocols/control-plane-protocol/frr-bgp:bgp
- */
-int routing_control_plane_protocols_control_plane_protocol_bgp_create(
-	struct nb_cb_create_args *args)
+* XPath: /frr-routing:routing/control-plane-protocols/control-plane-protocol/frr-bgp:bgp
+*/
+int bgp_router_create(struct nb_cb_create_args *args)
 {
+	const struct lyd_node *vrf_dnode;
+	struct bgp *bgp;
+	const char *vrf_name;
+	const char *name = NULL;
+	as_t as;
+	const char *as_str;
+	enum bgp_instance_type inst_type;
+	bool is_view_inst = false;
+	int ret;
+	int is_new_bgp = 0;
+	enum asnotation_mode asnotation = ASNOTATION_UNDEFINED;
+
+	inst_type = BGP_INSTANCE_TYPE_DEFAULT;
+
 	switch (args->event) {
 	case NB_EV_VALIDATE:
 	case NB_EV_PREPARE:
 	case NB_EV_ABORT:
+		return NB_OK;
 	case NB_EV_APPLY:
-		/* TODO: implement me. */
+		vrf_dnode = yang_dnode_get_parent(args->dnode,
+						  "control-plane-protocol");
+		vrf_name = yang_dnode_get_string(vrf_dnode, "./vrf");
+
+		if (strmatch(vrf_name, VRF_DEFAULT_NAME)) {
+			name = NULL;
+		} else {
+			name = vrf_name;
+			inst_type = BGP_INSTANCE_TYPE_VRF;
+		}
+
+		as = yang_dnode_get_uint32(args->dnode, "./global/local-as");
+		as_str = yang_dnode_get_string(args->dnode, "./global/local-as");
+
+		is_view_inst =
+			yang_dnode_get_bool(args->dnode,
+					    "./global/instance-type-view");
+
+		if (yang_dnode_exists(args->dnode, "./global/as-notation")) {
+			asnotation = yang_dnode_get_enum(args->dnode,
+							 "./global/as-notation");
+		}
+
+		if (is_view_inst)
+			inst_type = BGP_INSTANCE_TYPE_VIEW;
+
+
+		if (inst_type == BGP_INSTANCE_TYPE_DEFAULT)
+			is_new_bgp = (bgp_lookup(as, name) == NULL);
+		else
+			is_new_bgp = (bgp_lookup_by_name(name) == NULL);
+
+		ret = bgp_get_vty(&bgp, &as, name, inst_type, as_str,
+				  asnotation);
+		if (ret) {
+			switch (ret) {
+			case BGP_ERR_AS_MISMATCH:
+				snprintf(args->errmsg, args->errmsg_len,
+					 "BGP instance is already running; AS is %s",
+					 bgp->as_pretty);
+				break;
+			case BGP_ERR_INSTANCE_MISMATCH:
+				snprintf(args->errmsg, args->errmsg_len,
+					 "BGP instance type mismatch");
+				break;
+			}
+
+			UNSET_FLAG(bgp->vrf_flags, BGP_VRF_AUTO);
+
+			nb_running_set_entry(args->dnode, bgp);
+
+			return NB_ERR_INCONSISTENCY;
+		}
+
+		/*
+		 * If we just instantiated the default instance, complete
+		 * any pending VRF-VPN leaking that was configured via
+		 * earlier "router bgp X vrf FOO" blocks.
+		 */
+		if (is_new_bgp && inst_type == BGP_INSTANCE_TYPE_DEFAULT)
+			vpn_leak_postchange_all();
+
+		/*
+		 * Check if we need to export to other VRF(s).
+		 * Leak the routes to importing bgp vrf instances,
+		 * only when new bgp vrf instance is configured.
+		 */
+		if (inst_type == BGP_INSTANCE_TYPE_VRF)
+			bgp_vpn_leak_export(bgp);
+
+		/* for pre-existing bgp instance,
+		 * - update as_pretty
+		 * - update asnotation if explicitly mentioned
+		 */
+		if (CHECK_FLAG(bgp->vrf_flags, BGP_VRF_AUTO)) {
+			XFREE(MTYPE_BGP_NAME, bgp->as_pretty);
+			bgp->as_pretty = XSTRDUP(MTYPE_BGP_NAME, as_str);
+			if (!CHECK_FLAG(bgp->config, BGP_CONFIG_ASNOTATION) &&
+			    asnotation != ASNOTATION_UNDEFINED) {
+				SET_FLAG(bgp->config, BGP_CONFIG_ASNOTATION);
+				bgp->asnotation = asnotation;
+			}
+		}
+
+		UNSET_FLAG(bgp->vrf_flags, BGP_VRF_AUTO);
+
+		nb_running_set_entry(args->dnode, bgp);
 		break;
 	}
 
@@ -31,15 +153,79 @@ void routing_control_plane_protocols_control_plane_protocol_bgp_cli_write(
 	/* TODO: this cli callback is optional; the cli output may not need to be done at each node. */
 }
 
-int routing_control_plane_protocols_control_plane_protocol_bgp_destroy(
-	struct nb_cb_destroy_args *args)
+int bgp_router_destroy(struct nb_cb_destroy_args *args)
 {
+	struct bgp *bgp;
+
 	switch (args->event) {
 	case NB_EV_VALIDATE:
+		bgp = nb_running_get_entry(args->dnode, NULL, false);
+
+		if (!bgp)
+			return NB_OK;
+
+		if (bgp->l3vni) {
+			snprintf(args->errmsg, args->errmsg_len,
+				 "Please unconfigure l3vni %u", bgp->l3vni);
+			return NB_ERR_VALIDATION;
+		}
+
+		/* Cannot delete default instance if vrf instances exist */
+		if (bgp->inst_type == BGP_INSTANCE_TYPE_DEFAULT) {
+			struct listnode *node;
+			struct bgp *tmp_bgp;
+
+			for (ALL_LIST_ELEMENTS_RO(bm->bgp, node, tmp_bgp)) {
+				if (tmp_bgp->inst_type != BGP_INSTANCE_TYPE_VRF)
+					continue;
+				if (CHECK_FLAG(tmp_bgp->af_flags[AFI_IP]
+								[SAFI_UNICAST],
+					       BGP_CONFIG_MPLSVPN_TO_VRF_IMPORT) ||
+				    CHECK_FLAG(tmp_bgp->af_flags[AFI_IP6]
+								[SAFI_UNICAST],
+					       BGP_CONFIG_MPLSVPN_TO_VRF_IMPORT) ||
+				    CHECK_FLAG(tmp_bgp->af_flags[AFI_IP]
+								[SAFI_UNICAST],
+					       BGP_CONFIG_VRF_TO_MPLSVPN_EXPORT) ||
+				    CHECK_FLAG(tmp_bgp->af_flags[AFI_IP6]
+								[SAFI_UNICAST],
+					       BGP_CONFIG_VRF_TO_MPLSVPN_EXPORT) ||
+				    CHECK_FLAG(tmp_bgp->af_flags[AFI_IP]
+								[SAFI_UNICAST],
+					       BGP_CONFIG_VRF_TO_VRF_EXPORT) ||
+				    CHECK_FLAG(tmp_bgp->af_flags[AFI_IP6]
+								[SAFI_UNICAST],
+					       BGP_CONFIG_VRF_TO_VRF_EXPORT) ||
+				    (bgp == bgp_get_evpn() &&
+				     (CHECK_FLAG(tmp_bgp->af_flags[AFI_L2VPN]
+								  [SAFI_EVPN],
+						 BGP_L2VPN_EVPN_ADV_IPV4_UNICAST) ||
+				      CHECK_FLAG(tmp_bgp->af_flags[AFI_L2VPN]
+								  [SAFI_EVPN],
+						 BGP_L2VPN_EVPN_ADV_IPV4_UNICAST_GW_IP) ||
+				      CHECK_FLAG(tmp_bgp->af_flags[AFI_L2VPN]
+								  [SAFI_EVPN],
+						 BGP_L2VPN_EVPN_ADV_IPV6_UNICAST) ||
+				      CHECK_FLAG(tmp_bgp->af_flags[AFI_L2VPN]
+								  [SAFI_EVPN],
+						 BGP_L2VPN_EVPN_ADV_IPV6_UNICAST_GW_IP))) ||
+				    (tmp_bgp->l3vni)) {
+					snprintf(args->errmsg, args->errmsg_len,
+						 "Cannot delete default BGP instance. Dependent VRF instances exist\n");
+					return NB_ERR_VALIDATION;
+				}
+			}
+		}
+
+		break;
 	case NB_EV_PREPARE:
 	case NB_EV_ABORT:
+		return NB_OK;
 	case NB_EV_APPLY:
-		/* TODO: implement me. */
+		bgp = nb_running_unset_entry(args->dnode);
+
+		bgp_delete(bgp);
+
 		break;
 	}
 
@@ -47,17 +233,33 @@ int routing_control_plane_protocols_control_plane_protocol_bgp_destroy(
 }
 
 /*
- * XPath: /frr-routing:routing/control-plane-protocols/control-plane-protocol/frr-bgp:bgp/global/local-as
- */
+* XPath: /frr-routing:routing/control-plane-protocols/control-plane-protocol/frr-bgp:bgp/global/local-as
+*/
 int routing_control_plane_protocols_control_plane_protocol_bgp_global_local_as_modify(
 	struct nb_cb_modify_args *args)
 {
+	struct bgp *bgp;
+
 	switch (args->event) {
 	case NB_EV_VALIDATE:
+		/*
+		 * Changing AS number is not allowed, but we must allow it
+		 * once, when the BGP instance is created the first time.
+		 * If the instance already exists - return the validation
+		 * error.
+		 */
+		bgp = nb_running_get_entry_non_rec(lyd_parent(lyd_parent(
+							   args->dnode)),
+						   NULL, false);
+		if (bgp) {
+			snprintf(args->errmsg, args->errmsg_len,
+				 "Changing AS number is not allowed");
+			return NB_ERR_VALIDATION;
+		}
+		break;
 	case NB_EV_PREPARE:
 	case NB_EV_ABORT:
 	case NB_EV_APPLY:
-		/* TODO: implement me. */
 		break;
 	}
 
@@ -71,19 +273,80 @@ void routing_control_plane_protocols_control_plane_protocol_bgp_global_local_as_
 }
 
 /*
+* XPath: /frr-routing:routing/control-plane-protocols/control-plane-protocol/frr-bgp:bgp/global/as-notation
+*/
+int routing_control_plane_protocols_control_plane_protocol_bgp_global_as_notation_modify(
+	struct nb_cb_modify_args *args)
+{
+	struct bgp *bgp;
+
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+
+		/*
+		 * Changing as-notation is not allowed, but we must allow it
+		 * once, when the BGP instance is created the first time.
+		 * If the instance already exists - return the validation
+		 * error.
+		 */
+		bgp = nb_running_get_entry_non_rec(lyd_parent(lyd_parent(
+							   args->dnode)),
+						   NULL, false);
+
+		if (bgp) {
+			snprintf(args->errmsg, args->errmsg_len,
+				 "Changing AS notation is not allowed");
+			return NB_ERR_VALIDATION;
+		}
+		break;
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+	case NB_EV_APPLY:
+		break;
+	}
+
+	return NB_OK;
+}
+
+void routing_control_plane_protocols_control_plane_protocol_bgp_global_as_notation_cli_write(
+	struct vty *vty, const struct lyd_node *dnode, bool show_defaults)
+{
+	/* TODO: this cli callback is optional; the cli output may not need to be done at each node. */
+}
+
+int routing_control_plane_protocols_control_plane_protocol_bgp_global_as_notation_destroy(
+	struct nb_cb_destroy_args *args)
+{
+	switch (args->event) {
+	case NB_EV_VALIDATE:
+		snprintf(args->errmsg, args->errmsg_len,
+			 "Deleting AS notation is not allowed");
+		return NB_ERR_VALIDATION;
+	case NB_EV_PREPARE:
+	case NB_EV_ABORT:
+	case NB_EV_APPLY:
+		break;
+	}
+
+	return NB_OK;
+}
+
+
+/*
  * XPath: /frr-routing:routing/control-plane-protocols/control-plane-protocol/frr-bgp:bgp/global/router-id
  */
 int routing_control_plane_protocols_control_plane_protocol_bgp_global_router_id_modify(
 	struct nb_cb_modify_args *args)
 {
-	switch (args->event) {
-	case NB_EV_VALIDATE:
-	case NB_EV_PREPARE:
-	case NB_EV_ABORT:
-	case NB_EV_APPLY:
-		/* TODO: implement me. */
-		break;
-	}
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	struct bgp *bgp;
+	struct in_addr router_id;
+
+	bgp = nb_running_get_entry(args->dnode, NULL, true);
+	yang_dnode_get_ipv4(&router_id, args->dnode, NULL);
+	bgp_router_id_static_set(bgp, router_id);
 
 	return NB_OK;
 }
@@ -97,17 +360,20 @@ void routing_control_plane_protocols_control_plane_protocol_bgp_global_router_id
 int routing_control_plane_protocols_control_plane_protocol_bgp_global_router_id_destroy(
 	struct nb_cb_destroy_args *args)
 {
-	switch (args->event) {
-	case NB_EV_VALIDATE:
-	case NB_EV_PREPARE:
-	case NB_EV_ABORT:
-	case NB_EV_APPLY:
-		/* TODO: implement me. */
-		break;
-	}
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	struct bgp *bgp;
+	struct in_addr router_id;
+
+	bgp = nb_running_get_entry(args->dnode, NULL, true);
+
+	router_id.s_addr = INADDR_ANY;
+	bgp_router_id_static_set(bgp, router_id);
 
 	return NB_OK;
 }
+
 
 /*
  * XPath: /frr-routing:routing/control-plane-protocols/control-plane-protocol/frr-bgp:bgp/global/confederation/identifier
@@ -115,12 +381,31 @@ int routing_control_plane_protocols_control_plane_protocol_bgp_global_router_id_
 int routing_control_plane_protocols_control_plane_protocol_bgp_global_confederation_identifier_modify(
 	struct nb_cb_modify_args *args)
 {
+	struct bgp *bgp;
+	as_t as;
+	char as_str[ASN_STRING_MAX_SIZE * 3];
+
 	switch (args->event) {
 	case NB_EV_VALIDATE:
+		as = yang_dnode_get_uint32(args->dnode, NULL);
+		if (!as) {
+			snprintf(args->errmsg, args->errmsg_len, "Invalid AS.");
+			return NB_ERR_VALIDATION;
+		}
+
+		break;
 	case NB_EV_PREPARE:
 	case NB_EV_ABORT:
+		return NB_OK;
 	case NB_EV_APPLY:
-		/* TODO: implement me. */
+		bgp = nb_running_get_entry(args->dnode, NULL, true);
+
+		as = yang_dnode_get_uint32(args->dnode, NULL);
+
+		asn_asn2string(&as, as_str, sizeof(as_str), bgp->asnotation);
+
+		bgp_confederation_id_set(bgp, as, as_str);
+
 		break;
 	}
 
@@ -136,14 +421,14 @@ void routing_control_plane_protocols_control_plane_protocol_bgp_global_confedera
 int routing_control_plane_protocols_control_plane_protocol_bgp_global_confederation_identifier_destroy(
 	struct nb_cb_destroy_args *args)
 {
-	switch (args->event) {
-	case NB_EV_VALIDATE:
-	case NB_EV_PREPARE:
-	case NB_EV_ABORT:
-	case NB_EV_APPLY:
-		/* TODO: implement me. */
-		break;
-	}
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	struct bgp *bgp;
+
+	bgp = nb_running_get_entry(args->dnode, NULL, true);
+
+	bgp_confederation_id_unset(bgp);
 
 	return NB_OK;
 }
@@ -154,12 +439,33 @@ int routing_control_plane_protocols_control_plane_protocol_bgp_global_confederat
 int routing_control_plane_protocols_control_plane_protocol_bgp_global_confederation_member_as_create(
 	struct nb_cb_create_args *args)
 {
+	as_t my_as, as;
+	char as_str[ASN_STRING_MAX_SIZE * 3];
+	struct bgp *bgp;
+
 	switch (args->event) {
 	case NB_EV_VALIDATE:
+		my_as = yang_dnode_get_uint32(args->dnode,
+					      "../../../global/local-as");
+		as = yang_dnode_get_uint32(args->dnode, NULL);
+		if (my_as == as) {
+			snprintf(args->errmsg, args->errmsg_len,
+				 "Local member-AS %u not allowed in confed peer list",
+				 my_as);
+			return NB_ERR_VALIDATION;
+		}
+
+		break;
 	case NB_EV_PREPARE:
 	case NB_EV_ABORT:
+		return NB_OK;
 	case NB_EV_APPLY:
-		/* TODO: implement me. */
+		bgp = nb_running_get_entry(args->dnode, NULL, true);
+		as = yang_dnode_get_uint32(args->dnode, NULL);
+		asn_asn2string(&as, as_str, sizeof(as_str), bgp->asnotation);
+
+		bgp_confederation_peers_add(bgp, as, as_str);
+
 		break;
 	}
 
@@ -175,16 +481,30 @@ void routing_control_plane_protocols_control_plane_protocol_bgp_global_confedera
 int routing_control_plane_protocols_control_plane_protocol_bgp_global_confederation_member_as_destroy(
 	struct nb_cb_destroy_args *args)
 {
-	switch (args->event) {
-	case NB_EV_VALIDATE:
-	case NB_EV_PREPARE:
-	case NB_EV_ABORT:
-	case NB_EV_APPLY:
-		/* TODO: implement me. */
-		break;
-	}
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+	as_t as;
+	struct bgp *bgp;
+
+	bgp = nb_running_get_entry(args->dnode, NULL, true);
+	as = yang_dnode_get_uint32(args->dnode, NULL);
+
+	bgp_confederation_peers_remove(bgp, as);
 
 	return NB_OK;
+}
+
+/*
+ * XPath:
+ * /frr-routing:routing/control-plane-protocols/control-plane-protocol/frr-bgp:bgp/global/med-config
+ */
+void bgp_global_med_config_apply_finish(struct nb_cb_apply_finish_args *args)
+{
+	struct bgp *bgp;
+
+	bgp = nb_running_get_entry(args->dnode, NULL, true);
+
+	bgp_maxmed_update(bgp);
 }
 
 /*
@@ -193,14 +513,14 @@ int routing_control_plane_protocols_control_plane_protocol_bgp_global_confederat
 int routing_control_plane_protocols_control_plane_protocol_bgp_global_med_config_enable_med_admin_modify(
 	struct nb_cb_modify_args *args)
 {
-	switch (args->event) {
-	case NB_EV_VALIDATE:
-	case NB_EV_PREPARE:
-	case NB_EV_ABORT:
-	case NB_EV_APPLY:
-		/* TODO: implement me. */
-		break;
-	}
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	struct bgp *bgp;
+
+	bgp = nb_running_get_entry(args->dnode, NULL, true);
+
+	bgp->v_maxmed_admin = yang_dnode_get_bool(args->dnode, NULL);
 
 	return NB_OK;
 }
@@ -217,12 +537,34 @@ void routing_control_plane_protocols_control_plane_protocol_bgp_global_med_confi
 int routing_control_plane_protocols_control_plane_protocol_bgp_global_med_config_max_med_admin_modify(
 	struct nb_cb_modify_args *args)
 {
+	struct bgp *bgp;
+	uint32_t med_admin_val;
+
 	switch (args->event) {
 	case NB_EV_VALIDATE:
+		med_admin_val = yang_dnode_get_uint32(args->dnode, NULL);
+
+		/* enable_med_admin is required to be enabled for max-med-admin
+		 * non default value.
+		 */
+		if (med_admin_val != BGP_MAXMED_VALUE_DEFAULT &&
+		    !yang_dnode_get_bool(args->dnode, "../enable-med-admin")) {
+			snprintf(args->errmsg, args->errmsg_len,
+				 "enable med admin is not set");
+			return NB_ERR_VALIDATION;
+		}
+
+		break;
 	case NB_EV_PREPARE:
 	case NB_EV_ABORT:
+		return NB_OK;
 	case NB_EV_APPLY:
-		/* TODO: implement me. */
+		bgp = nb_running_get_entry(args->dnode, NULL, true);
+
+		med_admin_val = yang_dnode_get_uint32(args->dnode, NULL);
+
+		bgp->maxmed_admin_value = med_admin_val;
+
 		break;
 	}
 
@@ -241,12 +583,19 @@ void routing_control_plane_protocols_control_plane_protocol_bgp_global_med_confi
 int routing_control_plane_protocols_control_plane_protocol_bgp_global_med_config_max_med_onstart_up_time_modify(
 	struct nb_cb_modify_args *args)
 {
+	struct bgp *bgp;
+
 	switch (args->event) {
 	case NB_EV_VALIDATE:
 	case NB_EV_PREPARE:
 	case NB_EV_ABORT:
+		return NB_OK;
 	case NB_EV_APPLY:
-		/* TODO: implement me. */
+		bgp = nb_running_get_entry(args->dnode, NULL, true);
+
+		bgp->v_maxmed_onstartup = yang_dnode_get_uint32(args->dnode,
+								NULL);
+
 		break;
 	}
 
@@ -262,12 +611,28 @@ void routing_control_plane_protocols_control_plane_protocol_bgp_global_med_confi
 int routing_control_plane_protocols_control_plane_protocol_bgp_global_med_config_max_med_onstart_up_time_destroy(
 	struct nb_cb_destroy_args *args)
 {
+	struct bgp *bgp;
+
 	switch (args->event) {
 	case NB_EV_VALIDATE:
 	case NB_EV_PREPARE:
 	case NB_EV_ABORT:
+		return NB_OK;
 	case NB_EV_APPLY:
-		/* TODO: implement me. */
+		bgp = nb_running_get_entry(args->dnode, NULL, true);
+
+		/* Cancel max-med onstartup if its on */
+		if (bgp->t_maxmed_onstartup) {
+			EVENT_OFF(bgp->t_maxmed_onstartup);
+			bgp->maxmed_onstartup_over = 1;
+		}
+
+		bgp->v_maxmed_onstartup = BGP_MAXMED_ONSTARTUP_UNCONFIGURED;
+		/* Resetting onstartup value as part of dependent node is
+		 * detroyed.
+		 */
+		bgp->maxmed_onstartup_value = BGP_MAXMED_VALUE_DEFAULT;
+
 		break;
 	}
 

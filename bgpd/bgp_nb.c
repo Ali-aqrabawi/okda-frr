@@ -1,8 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later
- * Copyright (C) 2024        Okda Networks
- *                           Amjad Daraiseh
- *                           Ali Aqrabawi
- */
+* Copyright (C) 2024        Okda Networks
+*                           Ali Aqrabawi
+*/
 
 #include "northbound.h"
 #include "bgpd/bgp_nb.h"
@@ -14,8 +13,8 @@ const struct frr_yang_module_info frr_bgp_info = {
 		{
 			.xpath = "/frr-routing:routing/control-plane-protocols/control-plane-protocol/frr-bgp:bgp",
 			.cbs = {
-				.create = routing_control_plane_protocols_control_plane_protocol_bgp_create,
-				.destroy = routing_control_plane_protocols_control_plane_protocol_bgp_destroy,
+				.create = bgp_router_create,
+				.destroy = bgp_router_destroy,
 			}
 		},
 		{
@@ -23,6 +22,13 @@ const struct frr_yang_module_info frr_bgp_info = {
 			.cbs = {
 				.modify = routing_control_plane_protocols_control_plane_protocol_bgp_global_local_as_modify,
 			}
+		},
+		{
+			.xpath = "/frr-routing:routing/control-plane-protocols/control-plane-protocol/frr-bgp:bgp/global/as-notation",
+    			.cbs = {
+	    			.modify = routing_control_plane_protocols_control_plane_protocol_bgp_global_as_notation_modify,
+				.destroy = routing_control_plane_protocols_control_plane_protocol_bgp_global_as_notation_destroy,
+    			}
 		},
 		{
 			.xpath = "/frr-routing:routing/control-plane-protocols/control-plane-protocol/frr-bgp:bgp/global/router-id",
@@ -43,6 +49,12 @@ const struct frr_yang_module_info frr_bgp_info = {
 			.cbs = {
 				.create = routing_control_plane_protocols_control_plane_protocol_bgp_global_confederation_member_as_create,
 				.destroy = routing_control_plane_protocols_control_plane_protocol_bgp_global_confederation_member_as_destroy,
+			}
+		},
+        {
+			.xpath = "/frr-routing:routing/control-plane-protocols/control-plane-protocol/frr-bgp:bgp/global/med-config",
+			.cbs = {
+				.apply_finish = bgp_global_med_config_apply_finish,
 			}
 		},
 		{

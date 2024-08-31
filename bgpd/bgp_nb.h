@@ -1,6 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later
  * Copyright (C) 2024        Okda Networks
- *                           Amjad Daraiseh
  *                           Ali Aqrabawi
  */
 
@@ -10,16 +9,20 @@
 extern const struct frr_yang_module_info frr_bgp_info;
 
 /* prototypes */
-int routing_control_plane_protocols_control_plane_protocol_bgp_create(
-	struct nb_cb_create_args *args);
+int bgp_router_create(struct nb_cb_create_args *args);
 void routing_control_plane_protocols_control_plane_protocol_bgp_cli_write(
 	struct vty *vty, const struct lyd_node *dnode, bool show_defaults);
-int routing_control_plane_protocols_control_plane_protocol_bgp_destroy(
-	struct nb_cb_destroy_args *args);
+int bgp_router_destroy(	struct nb_cb_destroy_args *args);
 int routing_control_plane_protocols_control_plane_protocol_bgp_global_local_as_modify(
 	struct nb_cb_modify_args *args);
 void routing_control_plane_protocols_control_plane_protocol_bgp_global_local_as_cli_write(
 	struct vty *vty, const struct lyd_node *dnode, bool show_defaults);
+int routing_control_plane_protocols_control_plane_protocol_bgp_global_as_notation_modify(
+	struct nb_cb_modify_args *args);
+void routing_control_plane_protocols_control_plane_protocol_bgp_global_as_notation_cli_write(
+	struct vty *vty, const struct lyd_node *dnode, bool show_defaults);
+int routing_control_plane_protocols_control_plane_protocol_bgp_global_as_notation_destroy(
+	struct nb_cb_destroy_args *args);
 int routing_control_plane_protocols_control_plane_protocol_bgp_global_router_id_modify(
 	struct nb_cb_modify_args *args);
 void routing_control_plane_protocols_control_plane_protocol_bgp_global_router_id_cli_write(
@@ -38,6 +41,7 @@ void routing_control_plane_protocols_control_plane_protocol_bgp_global_confedera
 	struct vty *vty, const struct lyd_node *dnode, bool show_defaults);
 int routing_control_plane_protocols_control_plane_protocol_bgp_global_confederation_member_as_destroy(
 	struct nb_cb_destroy_args *args);
+void bgp_global_med_config_apply_finish(struct nb_cb_apply_finish_args *args);
 int routing_control_plane_protocols_control_plane_protocol_bgp_global_med_config_enable_med_admin_modify(
 	struct nb_cb_modify_args *args);
 void routing_control_plane_protocols_control_plane_protocol_bgp_global_med_config_enable_med_admin_cli_write(

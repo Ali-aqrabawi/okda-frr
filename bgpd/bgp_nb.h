@@ -3,12 +3,14 @@
  *                           Ali Aqrabawi
  */
 
-#ifndef BGPD_OSFP_NB_H_
-#define PGPD_OSPF_NB_H_
+#ifndef _FRR_BGP_NB_H_
+#define _FRR_BGP_NB_H_
 
 extern const struct frr_yang_module_info frr_bgp_info;
 
 /* prototypes */
+int routing_control_plane_protocols_name_validate(
+	struct nb_cb_create_args *args);
 int bgp_router_create(struct nb_cb_create_args *args);
 void routing_control_plane_protocols_control_plane_protocol_bgp_cli_write(
 	struct vty *vty, const struct lyd_node *dnode, bool show_defaults);
@@ -7749,4 +7751,4 @@ int routing_control_plane_protocols_control_plane_protocol_bgp_peer_groups_peer_
 void routing_control_plane_protocols_control_plane_protocol_bgp_peer_groups_peer_group_capability_options_override_capability_cli_write(
 	struct vty *vty, const struct lyd_node *dnode, bool show_defaults);
 
-#endif /* BGPD_OSFP_NB_H_ */
+#endif /* _FRR_BGP_NB_H_ */

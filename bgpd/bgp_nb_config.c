@@ -14,20 +14,20 @@
 #include "bgpd/bgp_updgrp.h"
 
 
-//int routing_control_plane_protocols_name_validate(
-//       struct nb_cb_create_args *args)
-//{
-//       const char *name;
-//
-//       name = yang_dnode_get_string(args->dnode, "./name");
-//       if (!strmatch(name, "bgp")) {
-//	       snprintf(args->errmsg, args->errmsg_len,
-//			"per vrf only one bgp instance is supported.");
-//	       return NB_ERR_VALIDATION;
-//       }
-//       return NB_OK;
-//}
 
+int routing_control_plane_protocols_name_validate(
+       struct nb_cb_create_args *args)
+{
+       const char *name;
+
+       name = yang_dnode_get_string(args->dnode, "./name");
+       if (!strmatch(name, "bgp")) {
+	       snprintf(args->errmsg, args->errmsg_len,
+			"per vrf only one bgp instance is supported.");
+	       return NB_ERR_VALIDATION;
+       }
+       return NB_OK;
+}
 
 /*
 * XPath: /frr-routing:routing/control-plane-protocols/control-plane-protocol/frr-bgp:bgp
@@ -153,13 +153,29 @@ void routing_control_plane_protocols_control_plane_protocol_bgp_cli_write(
 	/* TODO: this cli callback is optional; the cli output may not need to be done at each node. */
 }
 
+/*
+* XPath: /frr-routing:routing/control-plane-protocols/control-plane-protocol
+* XPath: /frr-routing:routing/control-plane-protocols/control-plane-protocol/frr-bgp:bgp
+*/
 int bgp_router_destroy(struct nb_cb_destroy_args *args)
 {
 	struct bgp *bgp;
+	const struct lyd_node *bgp_dnode = args->dnode;
+	const char *router_type;
 
 	switch (args->event) {
 	case NB_EV_VALIDATE:
-		bgp = nb_running_get_entry(args->dnode, NULL, false);
+		if (yang_dnode_exists(args->dnode, "./type")) {
+			router_type = yang_dnode_get_string(args->dnode,
+							    "./type");
+
+			if (!strmatch(router_type, "frr-bgp:bgp"))
+				return NB_OK;
+			if (!yang_dnode_exists(args->dnode, "./bgp"))
+				return NB_OK;
+			bgp_dnode = yang_dnode_get(args->dnode, "./bgp");
+		}
+		bgp = nb_running_get_entry(bgp_dnode, NULL, false);
 
 		if (!bgp)
 			return NB_OK;
@@ -222,7 +238,17 @@ int bgp_router_destroy(struct nb_cb_destroy_args *args)
 	case NB_EV_ABORT:
 		return NB_OK;
 	case NB_EV_APPLY:
-		bgp = nb_running_unset_entry(args->dnode);
+		if (yang_dnode_exists(args->dnode, "./type")) {
+			router_type = yang_dnode_get_string(args->dnode,
+							    "./type");
+
+			if (!strmatch(router_type, "frr-bgp:bgp"))
+				return NB_OK;
+			if (!yang_dnode_exists(args->dnode, "./bgp"))
+				return NB_OK;
+			bgp_dnode = yang_dnode_get(args->dnode, "./bgp");
+		}
+		bgp = nb_running_unset_entry(bgp_dnode);
 
 		bgp_delete(bgp);
 

@@ -695,14 +695,22 @@ void routing_control_plane_protocols_control_plane_protocol_bgp_global_med_confi
 int routing_control_plane_protocols_control_plane_protocol_bgp_global_route_reflector_route_reflector_cluster_id_modify(
 	struct nb_cb_modify_args *args)
 {
-	switch (args->event) {
-	case NB_EV_VALIDATE:
-	case NB_EV_PREPARE:
-	case NB_EV_ABORT:
-	case NB_EV_APPLY:
-		/* TODO: implement me. */
-		break;
-	}
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	struct bgp *bgp;
+	struct in_addr cluster_id;
+
+	bgp = nb_running_get_entry(args->dnode, NULL, true);
+
+	/* cluster-id is either dotted-quad or a uint32 */
+	(void)inet_aton(lyd_get_value(args->dnode), &cluster_id);
+	bgp_cluster_id_set(bgp, &cluster_id);
+
+	if (bgp_clear_star_soft_out(bgp->name, args->errmsg, args->errmsg_len))
+		return NB_ERR_INCONSISTENCY;
+
+	return NB_OK;
 
 	return NB_OK;
 }

@@ -87,6 +87,9 @@ module frr-bgp {
 
     uses admin-distance;
   }
+  container bgp-master-config {
+
+}
 
   augment "/frr-rt:routing/frr-rt:control-plane-protocols/frr-rt:control-plane-protocol" {
     container bgp {

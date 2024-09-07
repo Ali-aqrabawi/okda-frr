@@ -7751,4 +7751,31 @@ int routing_control_plane_protocols_control_plane_protocol_bgp_peer_groups_peer_
 void routing_control_plane_protocols_control_plane_protocol_bgp_peer_groups_peer_group_capability_options_override_capability_cli_write(
 	struct vty *vty, const struct lyd_node *dnode, bool show_defaults);
 
+/* xpath macros */
+/* route-list */
+#define FRR_BGP_GLOBAL_XPATH                                                   \
+	"/frr-routing:routing/control-plane-protocols/"                        \
+	"control-plane-protocol[type='%s'][name='%s'][vrf='%s']/"              \
+	"frr-bgp:bgp"
+
+#define FRR_BGP_GLOBAL_AS_XPATH                                                \
+	"/frr-routing:routing/control-plane-protocols/"                        \
+	"control-plane-protocol[type='%s'][name='%s'][vrf='%s']/"              \
+	"frr-bgp:bgp/local-as"
+#define FRR_BGP_AFI_SAFI_REDIST_XPATH                                          \
+	"./global/afi-safis/afi-safi[afi-safi-name='%s']/%s/"                  \
+	"redistribution-list[route-type='%s'][route-instance='%s']"
+#define FRR_BGP_NEIGHBOR_NUM_XPATH "./neighbors/neighbor[remote-address='%s']%s"
+#define FRR_BGP_NEIGHBOR_UNNUM_XPATH                                           \
+	"./neighbors/unnumbered-neighbor[interface='%s']%s"
+#define FRR_BGP_PEER_GROUP_XPATH                                               \
+	"./peer-groups/peer-group[peer-group-name='%s']%s"
+#define FRR_BGP_NEIGHBOR_NUM_AFI_SAFI_XPATH                                    \
+	"./neighbors/neighbor[remote-address='%s']/afi-safis/afi-safi[afi-safi-name='%s']"
+#define FRR_BGP_NEIGHBOR_UNNUM_AFI_SAFI_XPATH                                  \
+	"./neighbors/neighbor[interface='%s']/afi-safis/afi-safi[afi-safi-name='%s']"
+#define FRR_BGP_PEER_GROUP_AFI_SAFI_XPATH                                      \
+	"./peer-groups/peer-group[peer-group-name='%s']/afi-safis/afi-safi[afi-safi-name='%s']"
+#define FRR_BGP_AF_XPATH "/afi-safis/afi-safi[afi-safi-name='%s']"
+
 #endif /* _FRR_BGP_NB_H_ */

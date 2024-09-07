@@ -29,6 +29,8 @@
 #include "filter.h"
 #include "frrstr.h"
 #include "asn.h"
+#include "northbound.h"
+#include "northbound_cli.h"
 
 #include "bgpd/bgpd.h"
 #include "bgpd/bgp_attr_evpn.h"
@@ -65,6 +67,7 @@
 #include "bgpd/bgp_mac.h"
 #include "bgpd/bgp_flowspec.h"
 #include "bgpd/bgp_conditional_adv.h"
+#include "bgpd/bgp_nb.h"
 #ifdef ENABLE_BGP_VNC
 #include "bgpd/rfapi/bgp_rfapi_cfg.h"
 #endif
@@ -996,29 +999,20 @@ enum clear_sort {
 	clear_as
 };
 
-static void bgp_clear_vty_error(struct vty *vty, struct peer *peer, afi_t afi,
-				safi_t safi, int error)
+static void bgp_clear_vty_error(struct peer *peer, afi_t afi, safi_t safi,
+				int error, char *errmsg, size_t errmsg_len)
 {
 	switch (error) {
 	case BGP_ERR_AF_UNCONFIGURED:
-		if (vty)
-			vty_out(vty,
-				"%% BGP: Enable %s address family for the neighbor %s\n",
-				get_afi_safi_str(afi, safi, false), peer->host);
-		else
-			zlog_warn(
-				"%% BGP: Enable %s address family for the neighbor %s",
-				get_afi_safi_str(afi, safi, false), peer->host);
+		snprintf(errmsg, errmsg_len,
+			 "%%BGP: Enable %s address family for the neighbor %s",
+			 get_afi_safi_str(afi, safi, false), peer->host);
 		break;
 	case BGP_ERR_SOFT_RECONFIG_UNCONFIGURED:
-		if (vty)
-			vty_out(vty,
-				"%% BGP: Inbound soft reconfig for %s not possible as it\n      has neither refresh capability, nor inbound soft reconfig\n",
-				peer->host);
-		else
-			zlog_warn(
-				"%% BGP: Inbound soft reconfig for %s not possible as it has neither refresh capability, nor inbound soft reconfig",
-				peer->host);
+		snprintf(
+			errmsg, errmsg_len,
+			"%%BGP: Inbound soft reconfig for %s not possible as it\n      has neither refresh capability, nor inbound soft reconfig",
+			peer->host);
 		break;
 	default:
 		break;
@@ -1097,9 +1091,9 @@ static int bgp_peer_clear(struct peer *peer, afi_t afi, safi_t safi,
 }
 
 /* `clear ip bgp' functions. */
-static int bgp_clear(struct vty *vty, struct bgp *bgp, afi_t afi, safi_t safi,
+static int bgp_clear(struct bgp *bgp, afi_t afi, safi_t safi,
 		     enum clear_sort sort, enum bgp_clear_type stype,
-		     const char *arg)
+		     const char *arg, char *errmsg, size_t errmsg_len)
 {
 	int ret = 0;
 	bool found = false;
@@ -1125,7 +1119,8 @@ static int bgp_clear(struct vty *vty, struct bgp *bgp, afi_t afi, safi_t safi,
 							  stype);
 
 			if (ret < 0)
-				bgp_clear_vty_error(vty, peer, afi, safi, ret);
+				bgp_clear_vty_error(peer, afi, safi, ret,
+						    errmsg, errmsg_len);
 		}
 
 		if (gr_router_detected
@@ -1154,8 +1149,9 @@ static int bgp_clear(struct vty *vty, struct bgp *bgp, afi_t afi, safi_t safi,
 			if (!peer) {
 				peer = peer_lookup_by_hostname(bgp, arg);
 				if (!peer) {
-					vty_out(vty,
-						"Malformed address or name: %s\n",
+					snprintf(
+						errmsg, errmsg_len,
+						"Malformed address or name: %s",
 						arg);
 					return CMD_WARNING;
 				}
@@ -1163,9 +1159,9 @@ static int bgp_clear(struct vty *vty, struct bgp *bgp, afi_t afi, safi_t safi,
 		} else {
 			peer = peer_lookup(bgp, &su);
 			if (!peer) {
-				vty_out(vty,
-					"%% BGP: Unknown neighbor - \"%s\"\n",
-					arg);
+				snprintf(errmsg, errmsg_len,
+					 "%%BGP: Unknown neighbor - \"%s\"",
+					 arg);
 				return CMD_WARNING;
 			}
 		}
@@ -1180,7 +1176,8 @@ static int bgp_clear(struct vty *vty, struct bgp *bgp, afi_t afi, safi_t safi,
 			ret = BGP_ERR_AF_UNCONFIGURED;
 
 		if (ret < 0)
-			bgp_clear_vty_error(vty, peer, afi, safi, ret);
+			bgp_clear_vty_error(peer, afi, safi, ret, errmsg,
+					    errmsg_len);
 
 		return CMD_SUCCESS;
 	}
@@ -1191,7 +1188,8 @@ static int bgp_clear(struct vty *vty, struct bgp *bgp, afi_t afi, safi_t safi,
 
 		group = peer_group_lookup(bgp, arg);
 		if (!group) {
-			vty_out(vty, "%% BGP: No such peer-group %s\n", arg);
+			snprintf(errmsg, errmsg_len,
+				 "%%BGP: No such peer-group %s", arg);
 			return CMD_WARNING;
 		}
 
@@ -1199,14 +1197,16 @@ static int bgp_clear(struct vty *vty, struct bgp *bgp, afi_t afi, safi_t safi,
 			ret = bgp_peer_clear(peer, afi, safi, &nnode, stype);
 
 			if (ret < 0)
-				bgp_clear_vty_error(vty, peer, afi, safi, ret);
+				bgp_clear_vty_error(peer, afi, safi, ret,
+						    errmsg, errmsg_len);
 			else
 				found = true;
 		}
 
 		if (!found)
-			vty_out(vty,
-				"%% BGP: No %s peer belonging to peer-group %s is configured\n",
+			snprintf(
+				errmsg, errmsg_len,
+				"%%BGP: No %s peer belonging to peer-group %s is configured",
 				get_afi_safi_str(afi, safi, false), arg);
 
 		return CMD_SUCCESS;
@@ -1226,7 +1226,8 @@ static int bgp_clear(struct vty *vty, struct bgp *bgp, afi_t afi, safi_t safi,
 			ret = bgp_peer_clear(peer, afi, safi, &nnode, stype);
 
 			if (ret < 0)
-				bgp_clear_vty_error(vty, peer, afi, safi, ret);
+				bgp_clear_vty_error(peer, afi, safi, ret,
+						    errmsg, errmsg_len);
 			else
 				found = true;
 		}
@@ -1240,9 +1241,9 @@ static int bgp_clear(struct vty *vty, struct bgp *bgp, afi_t afi, safi_t safi,
 		}
 
 		if (!found)
-			vty_out(vty,
-				"%% BGP: No external %s peer is configured\n",
-				get_afi_safi_str(afi, safi, false));
+			snprintf(errmsg, errmsg_len,
+				 "%%BGP: No external %s peer is configured",
+				 get_afi_safi_str(afi, safi, false));
 
 		return CMD_SUCCESS;
 	}
@@ -1252,7 +1253,8 @@ static int bgp_clear(struct vty *vty, struct bgp *bgp, afi_t afi, safi_t safi,
 		as_t as;
 
 		if (!asn_str2asn(arg, &as)) {
-			vty_out(vty, "%% BGP: No such AS %s\n", arg);
+			snprintf(errmsg, errmsg_len,
+				 "%% BGP: No such AS %s\n", arg);
 			return CMD_WARNING;
 		}
 
@@ -1268,7 +1270,8 @@ static int bgp_clear(struct vty *vty, struct bgp *bgp, afi_t afi, safi_t safi,
 			ret = bgp_peer_clear(peer, afi, safi, &nnode, stype);
 
 			if (ret < 0)
-				bgp_clear_vty_error(vty, peer, afi, safi, ret);
+				bgp_clear_vty_error(peer, afi, safi, ret,
+						    errmsg, errmsg_len);
 			else
 				found = true;
 		}
@@ -1282,9 +1285,9 @@ static int bgp_clear(struct vty *vty, struct bgp *bgp, afi_t afi, safi_t safi,
 		}
 
 		if (!found)
-			vty_out(vty,
-				"%% BGP: No %s peer is configured with AS %s\n",
-				get_afi_safi_str(afi, safi, false), arg);
+			snprintf(errmsg, errmsg_len,
+				 "%%BGP: No %s peer is configured with AS %s",
+				 get_afi_safi_str(afi, safi, false), arg);
 
 		return CMD_SUCCESS;
 	}
@@ -1292,9 +1295,9 @@ static int bgp_clear(struct vty *vty, struct bgp *bgp, afi_t afi, safi_t safi,
 	return CMD_SUCCESS;
 }
 
-static int bgp_clear_vty(struct vty *vty, const char *name, afi_t afi,
-			 safi_t safi, enum clear_sort sort,
-			 enum bgp_clear_type stype, const char *arg)
+static int bgp_clear_vty(const char *name, afi_t afi, safi_t safi,
+			 enum clear_sort sort, enum bgp_clear_type stype,
+			 const char *arg, char *errmsg, size_t errmsg_len)
 {
 	struct bgp *bgp;
 
@@ -1302,46 +1305,64 @@ static int bgp_clear_vty(struct vty *vty, const char *name, afi_t afi,
 	if (name) {
 		bgp = bgp_lookup_by_name(name);
 		if (bgp == NULL) {
-			vty_out(vty, "Can't find BGP instance %s\n", name);
+			snprintf(errmsg, errmsg_len,
+				 "Can't find BGP instance %s", name);
 			return CMD_WARNING;
 		}
 	} else {
 		bgp = bgp_get_default();
 		if (bgp == NULL) {
-			vty_out(vty, "No BGP process is configured\n");
+			snprintf(errmsg, errmsg_len,
+				 "No BGP process is configured");
 			return CMD_WARNING;
 		}
 	}
 
-	return bgp_clear(vty, bgp, afi, safi, sort, stype, arg);
+	return bgp_clear(bgp, afi, safi, sort, stype, arg, errmsg, errmsg_len);
 }
 
 /* clear soft inbound */
-static void bgp_clear_star_soft_in(struct vty *vty, const char *name)
+int bgp_clear_star_soft_in(const char *name, char *errmsg, size_t errmsg_len)
 {
 	afi_t afi;
 	safi_t safi;
+	int ret;
 
-	FOREACH_AFI_SAFI (afi, safi)
-		bgp_clear_vty(vty, name, afi, safi, clear_all,
-			      BGP_CLEAR_SOFT_IN, NULL);
+	FOREACH_AFI_SAFI (afi, safi) {
+		ret = bgp_clear_vty(name, afi, safi, clear_all,
+				    BGP_CLEAR_SOFT_IN, NULL, errmsg,
+				    errmsg_len);
+		if (ret != CMD_SUCCESS)
+			return -1;
+	}
+
+	return 0;
 }
 
 /* clear soft outbound */
-static void bgp_clear_star_soft_out(struct vty *vty, const char *name)
+int bgp_clear_star_soft_out(const char *name, char *errmsg, size_t errmsg_len)
 {
 	afi_t afi;
 	safi_t safi;
+	int ret;
 
-	FOREACH_AFI_SAFI (afi, safi)
-		bgp_clear_vty(vty, name, afi, safi, clear_all,
-			      BGP_CLEAR_SOFT_OUT, NULL);
+	FOREACH_AFI_SAFI (afi, safi) {
+		ret = bgp_clear_vty(name, afi, safi, clear_all,
+				    BGP_CLEAR_SOFT_OUT, NULL, errmsg,
+				    errmsg_len);
+		if (ret != CMD_SUCCESS)
+			return -1;
+	}
+
+	return 0;
 }
 
 
 void bgp_clear_soft_in(struct bgp *bgp, afi_t afi, safi_t safi)
 {
-	bgp_clear(NULL, bgp, afi, safi, clear_all, BGP_CLEAR_SOFT_IN, NULL);
+	char errmsg[BUFSIZ] = { '\0' };
+	bgp_clear(bgp, afi, safi, clear_all, BGP_CLEAR_SOFT_IN, NULL, errmsg,
+		  sizeof(errmsg));
 }
 
 static int peer_flag_modify_vty(struct vty *vty, const char *ip_str,
@@ -1490,7 +1511,7 @@ DEFUN (no_auto_summary,
 }
 
 /* "router bgp" commands. */
-DEFUN_NOSH (router_bgp,
+DEFUN_YANG_NOSH(router_bgp,
        router_bgp_cmd,
        "router bgp [ASNUM$instasn [<view|vrf> VIEWVRFNAME] [as-notation <dot|dot+|plain>]]",
        ROUTER_STR
@@ -1505,22 +1526,27 @@ DEFUN_NOSH (router_bgp,
 	int idx_asn = 2;
 	int idx_view_vrf = 3;
 	int idx_vrf = 4;
-	int is_new_bgp = 0;
 	int idx_asnotation = 3;
-	int idx_asnotation_kind = 4;
-	enum asnotation_mode asnotation = ASNOTATION_UNDEFINED;
+	char *as_notation = NULL;
 	int ret;
 	as_t as;
 	struct bgp *bgp;
 	const char *name = NULL;
 	enum bgp_instance_type inst_type;
+	char base_xpath[XPATH_MAXLEN];
+	const struct lyd_node *bgp_dnode;
+
 
 	// "router bgp" without an ASN
 	if (argc == 2) {
 		// Pending: Make VRF option available for ASN less config
-		bgp = bgp_get_default();
+		snprintf(base_xpath, sizeof(base_xpath), FRR_BGP_GLOBAL_XPATH,
+			 "frr-bgp:bgp", "bgp", VRF_DEFAULT_NAME);
 
-		if (bgp == NULL) {
+		bgp_dnode = yang_dnode_get(vty->candidate_config->dnode,
+					   base_xpath);
+
+		if (!bgp_dnode) {
 			vty_out(vty, "%% No BGP process is configured\n");
 			return CMD_WARNING_CONFIG_FAILED;
 		}
@@ -1529,6 +1555,19 @@ DEFUN_NOSH (router_bgp,
 			vty_out(vty, "%% Please specify ASN and VRF\n");
 			return CMD_WARNING_CONFIG_FAILED;
 		}
+
+		as = yang_dnode_get_uint32(bgp_dnode, "./global/local-as");
+
+		VTY_PUSH_XPATH(BGP_NODE, base_xpath);
+
+		/*
+		 * For backward compatibility with old commands we still
+		 * need to use the qobj infrastructure.
+		 */
+		bgp = bgp_lookup(as, NULL);
+		if (bgp)
+			VTY_PUSH_CONTEXT(BGP_NODE, bgp);
+		return CMD_SUCCESS;
 	}
 
 	// "router bgp X"
@@ -1539,9 +1578,6 @@ DEFUN_NOSH (router_bgp,
 			return CMD_WARNING_CONFIG_FAILED;
 		}
 
-		if (as == BGP_PRIVATE_AS_MAX || as == BGP_AS4_MAX)
-			vty_out(vty, "Reserved AS used (%u|%u); AS is %u\n",
-				BGP_PRIVATE_AS_MAX, BGP_AS4_MAX, as);
 
 		inst_type = BGP_INSTANCE_TYPE_DEFAULT;
 
@@ -1561,74 +1597,49 @@ DEFUN_NOSH (router_bgp,
 					inst_type = BGP_INSTANCE_TYPE_VIEW;
 			}
 		}
-		if (argv_find(argv, argc, "as-notation", &idx_asnotation)) {
-			idx_asnotation_kind = idx_asnotation + 1;
-			if (strmatch(argv[idx_asnotation_kind]->text, "dot+"))
-				asnotation = ASNOTATION_DOTPLUS;
-			else if (strmatch(argv[idx_asnotation_kind]->text,
-					  "dot"))
-				asnotation = ASNOTATION_DOT;
-			else if (strmatch(argv[idx_asnotation_kind]->text,
-					  "plain"))
-				asnotation = ASNOTATION_PLAIN;
+
+		if (argv_find(argv, argc, "as-notation", &idx_asnotation))
+			as_notation = argv[idx_asnotation + 1]->text;
+
+		snprintf(base_xpath, sizeof(base_xpath), FRR_BGP_GLOBAL_XPATH,
+			 "frr-bgp:bgp", "bgp", name ? name : VRF_DEFAULT_NAME);
+
+
+		nb_cli_enqueue_change(vty, ".", NB_OP_CREATE, NULL);
+		nb_cli_enqueue_change(vty, "./global/local-as", NB_OP_MODIFY,
+				      argv[idx_asn]->arg);
+		if (inst_type == BGP_INSTANCE_TYPE_VIEW) {
+			nb_cli_enqueue_change(vty, "./global/instance-type-view",
+					      NB_OP_MODIFY, "true");
+		} else {
+			nb_cli_enqueue_change(vty, "./global/instance-type-view",
+					      NB_OP_MODIFY, "false");
 		}
 
-		if (inst_type == BGP_INSTANCE_TYPE_DEFAULT)
-			is_new_bgp = (bgp_lookup(as, name) == NULL);
-
-		ret = bgp_get_vty(&bgp, &as, name, inst_type,
-				  argv[idx_asn]->arg, asnotation);
-		switch (ret) {
-		case BGP_ERR_AS_MISMATCH:
-			vty_out(vty, "BGP is already running; AS is %s\n",
-				bgp->as_pretty);
-			return CMD_WARNING_CONFIG_FAILED;
-		case BGP_ERR_INSTANCE_MISMATCH:
-			vty_out(vty,
-				"BGP instance name and AS number mismatch\n");
-			vty_out(vty,
-				"BGP instance is already running; AS is %s\n",
-				bgp->as_pretty);
-			return CMD_WARNING_CONFIG_FAILED;
+		if (as_notation) {
+			nb_cli_enqueue_change(vty, "./global/as-notation",
+					      NB_OP_MODIFY, as_notation);
 		}
 
-		/*
-		 * If we just instantiated the default instance, complete
-		 * any pending VRF-VPN leaking that was configured via
-		 * earlier "router bgp X vrf FOO" blocks.
-		 */
-		if (is_new_bgp && inst_type == BGP_INSTANCE_TYPE_DEFAULT)
-			vpn_leak_postchange_all();
+		ret = nb_cli_apply_changes_clear_pending(vty, "%s", base_xpath);
+		if (ret == CMD_SUCCESS) {
+			VTY_PUSH_XPATH(BGP_NODE, base_xpath);
 
-		if (inst_type == BGP_INSTANCE_TYPE_VRF)
-			bgp_vpn_leak_export(bgp);
-		/* Pending: handle when user tries to change a view to vrf n vv.
-		 */
-		/* for pre-existing bgp instance,
-		 * - update as_pretty
-		 * - update asnotation if explicitly mentioned
-		 */
-		if (CHECK_FLAG(bgp->vrf_flags, BGP_VRF_AUTO)) {
-			XFREE(MTYPE_BGP_NAME, bgp->as_pretty);
-			bgp->as_pretty = XSTRDUP(MTYPE_BGP_NAME,
-						 argv[idx_asn]->arg);
-			if (!CHECK_FLAG(bgp->config, BGP_CONFIG_ASNOTATION) &&
-			    asnotation != ASNOTATION_UNDEFINED) {
-				SET_FLAG(bgp->config, BGP_CONFIG_ASNOTATION);
-				bgp->asnotation = asnotation;
-			}
+			/*
+			 * For backward compatibility with old commands we still
+			 * need to use the qobj infrastructure.
+			 */
+			bgp = bgp_lookup(as, name);
+			if (bgp)
+				VTY_PUSH_CONTEXT(BGP_NODE, bgp);
 		}
 	}
 
-	/* unset the auto created flag as the user config is now present */
-	UNSET_FLAG(bgp->vrf_flags, BGP_VRF_AUTO);
-	VTY_PUSH_CONTEXT(BGP_NODE, bgp);
-
-	return CMD_SUCCESS;
+	return ret;
 }
 
 /* "no router bgp" commands. */
-DEFUN (no_router_bgp,
+DEFUN_YANG (no_router_bgp,
        no_router_bgp_cmd,
        "no router bgp [ASNUM$instasn [<view|vrf> VIEWVRFNAME] [as-notation <dot|dot+|plain>]]",
        NO_STR
@@ -1641,18 +1652,20 @@ DEFUN (no_router_bgp,
        "use 'AA.BB' format for all AS values\n"
        "use plain format for all AS values\n")
 {
-	int idx_asn = 3;
 	int idx_vrf = 5;
-	as_t as;
-	struct bgp *bgp;
 	const char *name = NULL;
+	char base_xpath[XPATH_MAXLEN];
+	const struct lyd_node *bgp_dnode;
 
 	// "no router bgp" without an ASN
 	if (argc == 3) {
 		// Pending: Make VRF option available for ASN less config
-		bgp = bgp_get_default();
+		snprintf(base_xpath, sizeof(base_xpath), FRR_BGP_GLOBAL_XPATH,
+			 "frr-bgp:bgp", "bgp", VRF_DEFAULT_NAME);
 
-		if (bgp == NULL) {
+		bgp_dnode = yang_dnode_get(vty->candidate_config->dnode,
+					   base_xpath);
+		if (!bgp_dnode) {
 			vty_out(vty, "%% No BGP process is configured\n");
 			return CMD_WARNING_CONFIG_FAILED;
 		}
@@ -1661,101 +1674,26 @@ DEFUN (no_router_bgp,
 			vty_out(vty, "%% Please specify ASN and VRF\n");
 			return CMD_WARNING_CONFIG_FAILED;
 		}
-
-		if (bgp->l3vni) {
-			vty_out(vty, "%% Please unconfigure l3vni %u\n",
-				bgp->l3vni);
-			return CMD_WARNING_CONFIG_FAILED;
-		}
 	} else {
-		if (!asn_str2asn(argv[idx_asn]->arg, &as)) {
-			vty_out(vty, "%% BGP: No such AS %s\n",
-				argv[idx_asn]->arg);
-			return CMD_WARNING_CONFIG_FAILED;
-		}
-		if (argc > 4) {
+		if (argc > 4)
 			name = argv[idx_vrf]->arg;
-			if (strmatch(argv[idx_vrf - 1]->text, "vrf")
-			    && strmatch(name, VRF_DEFAULT_NAME))
-				name = NULL;
-		}
+		else
+			name = VRF_DEFAULT_NAME;
 
-		/* Lookup bgp structure. */
-		bgp = bgp_lookup(as, name);
-		if (!bgp) {
+		snprintf(base_xpath, sizeof(base_xpath), FRR_BGP_GLOBAL_XPATH,
+			 "frr-bgp:bgp", "bgp", name);
+		bgp_dnode = yang_dnode_get(vty->candidate_config->dnode,
+					   base_xpath);
+		if (!bgp_dnode) {
 			vty_out(vty, "%% Can't find BGP instance\n");
 			return CMD_WARNING_CONFIG_FAILED;
 		}
-
-		if (bgp->l3vni) {
-			vty_out(vty, "%% Please unconfigure l3vni %u\n",
-				bgp->l3vni);
-			return CMD_WARNING_CONFIG_FAILED;
-		}
-
-		/* Cannot delete default instance if vrf instances exist */
-		if (bgp->inst_type == BGP_INSTANCE_TYPE_DEFAULT) {
-			struct listnode *node;
-			struct bgp *tmp_bgp;
-
-			for (ALL_LIST_ELEMENTS_RO(bm->bgp, node, tmp_bgp)) {
-				if (tmp_bgp->inst_type != BGP_INSTANCE_TYPE_VRF)
-					continue;
-
-				if (CHECK_FLAG(tmp_bgp->vrf_flags, BGP_VRF_AUTO))
-					bgp_delete(tmp_bgp);
-
-				if (CHECK_FLAG(
-					    tmp_bgp->af_flags[AFI_IP]
-							     [SAFI_UNICAST],
-					    BGP_CONFIG_MPLSVPN_TO_VRF_IMPORT) ||
-				    CHECK_FLAG(
-					    tmp_bgp->af_flags[AFI_IP6]
-							     [SAFI_UNICAST],
-					    BGP_CONFIG_MPLSVPN_TO_VRF_IMPORT) ||
-				    CHECK_FLAG(
-					    tmp_bgp->af_flags[AFI_IP]
-							     [SAFI_UNICAST],
-					    BGP_CONFIG_VRF_TO_MPLSVPN_EXPORT) ||
-				    CHECK_FLAG(
-					    tmp_bgp->af_flags[AFI_IP6]
-							     [SAFI_UNICAST],
-					    BGP_CONFIG_VRF_TO_MPLSVPN_EXPORT) ||
-				    CHECK_FLAG(tmp_bgp->af_flags[AFI_IP]
-								[SAFI_UNICAST],
-					       BGP_CONFIG_VRF_TO_VRF_EXPORT) ||
-				    CHECK_FLAG(tmp_bgp->af_flags[AFI_IP6]
-								[SAFI_UNICAST],
-					       BGP_CONFIG_VRF_TO_VRF_EXPORT) ||
-				    (bgp == bgp_get_evpn() &&
-				     (CHECK_FLAG(
-					      tmp_bgp->af_flags[AFI_L2VPN]
-							       [SAFI_EVPN],
-					      BGP_L2VPN_EVPN_ADV_IPV4_UNICAST) ||
-				      CHECK_FLAG(
-					      tmp_bgp->af_flags[AFI_L2VPN]
-							       [SAFI_EVPN],
-					      BGP_L2VPN_EVPN_ADV_IPV4_UNICAST_GW_IP) ||
-				      CHECK_FLAG(
-					      tmp_bgp->af_flags[AFI_L2VPN]
-							       [SAFI_EVPN],
-					      BGP_L2VPN_EVPN_ADV_IPV6_UNICAST) ||
-				      CHECK_FLAG(
-					      tmp_bgp->af_flags[AFI_L2VPN]
-							       [SAFI_EVPN],
-					      BGP_L2VPN_EVPN_ADV_IPV6_UNICAST_GW_IP))) ||
-				    (tmp_bgp->l3vni)) {
-					vty_out(vty,
-						"%% Cannot delete default BGP instance. Dependent VRF instances exist\n");
-					return CMD_WARNING_CONFIG_FAILED;
-				}
-			}
-		}
 	}
 
-	bgp_delete(bgp);
+	nb_cli_enqueue_change(vty, ".", NB_OP_DESTROY, NULL);
 
-	return CMD_SUCCESS;
+	/* We want to finish any classic config after a no router */
+	return nb_cli_apply_changes_clear_pending(vty, "%s", base_xpath);
 }
 
 /* bgp session-dscp */
@@ -1787,19 +1725,20 @@ DEFPY (no_bgp_session_dscp,
 
 /* BGP router-id.  */
 
-DEFPY (bgp_router_id,
+DEFPY_YANG (bgp_router_id,
        bgp_router_id_cmd,
        "bgp router-id A.B.C.D",
        BGP_STR
        "Override configured router identifier\n"
        "Manually configured router identifier\n")
 {
-	VTY_DECLVAR_CONTEXT(bgp, bgp);
-	bgp_router_id_static_set(bgp, router_id);
-	return CMD_SUCCESS;
+	nb_cli_enqueue_change(vty, "./global/router-id", NB_OP_MODIFY,
+			      router_id_str);
+
+	return nb_cli_apply_changes(vty, NULL);
 }
 
-DEFPY (no_bgp_router_id,
+DEFPY_YANG (no_bgp_router_id,
        no_bgp_router_id_cmd,
        "no bgp router-id [A.B.C.D]",
        NO_STR
@@ -1807,19 +1746,10 @@ DEFPY (no_bgp_router_id,
        "Override configured router identifier\n"
        "Manually configured router identifier\n")
 {
-	VTY_DECLVAR_CONTEXT(bgp, bgp);
+	nb_cli_enqueue_change(vty, "./global/router-id", NB_OP_DESTROY,
+			      router_id_str ? router_id_str : NULL);
 
-	if (router_id_str) {
-		if (!IPV4_ADDR_SAME(&bgp->router_id_static, &router_id)) {
-			vty_out(vty, "%% BGP router-id doesn't match\n");
-			return CMD_WARNING_CONFIG_FAILED;
-		}
-	}
-
-	router_id.s_addr = 0;
-	bgp_router_id_static_set(bgp, router_id);
-
-	return CMD_SUCCESS;
+	return nb_cli_apply_changes(vty, NULL);
 }
 
 DEFPY(bgp_community_alias, bgp_community_alias_cmd,
@@ -1935,21 +1865,13 @@ DEFUN (bgp_cluster_id,
        "Route-Reflector Cluster-id in IP address format\n"
        "Route-Reflector Cluster-id as 32 bit quantity\n")
 {
-	VTY_DECLVAR_CONTEXT(bgp, bgp);
 	int idx_ipv4 = 2;
-	int ret;
-	struct in_addr cluster;
 
-	ret = inet_aton(argv[idx_ipv4]->arg, &cluster);
-	if (!ret) {
-		vty_out(vty, "%% Malformed bgp cluster identifier\n");
-		return CMD_WARNING_CONFIG_FAILED;
-	}
+	nb_cli_enqueue_change(
+		vty, "./global/route-reflector/route-reflector-cluster-id",
+		NB_OP_MODIFY, argv[idx_ipv4]->arg);
 
-	bgp_cluster_id_set(bgp, &cluster);
-	bgp_clear_star_soft_out(vty, bgp->name);
-
-	return CMD_SUCCESS;
+	return nb_cli_apply_changes(vty, NULL);
 }
 
 DEFUN (no_bgp_cluster_id,
@@ -1963,7 +1885,7 @@ DEFUN (no_bgp_cluster_id,
 {
 	VTY_DECLVAR_CONTEXT(bgp, bgp);
 	bgp_cluster_id_unset(bgp);
-	bgp_clear_star_soft_out(vty, bgp->name);
+//	bgp_clear_star_soft_out(vty, bgp->name);
 
 	return CMD_SUCCESS;
 }
@@ -2780,7 +2702,7 @@ DEFUN (bgp_client_to_client_reflection,
 {
 	VTY_DECLVAR_CONTEXT(bgp, bgp);
 	UNSET_FLAG(bgp->flags, BGP_FLAG_NO_CLIENT_TO_CLIENT);
-	bgp_clear_star_soft_out(vty, bgp->name);
+//	bgp_clear_star_soft_out(vty, bgp->name);
 
 	return CMD_SUCCESS;
 }
@@ -2795,7 +2717,7 @@ DEFUN (no_bgp_client_to_client_reflection,
 {
 	VTY_DECLVAR_CONTEXT(bgp, bgp);
 	SET_FLAG(bgp->flags, BGP_FLAG_NO_CLIENT_TO_CLIENT);
-	bgp_clear_star_soft_out(vty, bgp->name);
+//	bgp_clear_star_soft_out(vty, bgp->name);
 
 	return CMD_SUCCESS;
 }
@@ -3592,6 +3514,7 @@ DEFPY (neighbor_graceful_shutdown,
 	struct peer *peer;
 	VTY_DECLVAR_CONTEXT(bgp, bgp);
 	int ret;
+	char errmsg[BUFSIZ] = {'\0'};
 
 	peer = peer_and_group_lookup_vty(vty, neighbor);
 	if (!peer)
@@ -3608,8 +3531,12 @@ DEFPY (neighbor_graceful_shutdown,
 		if (!peer->afc[afi][safi])
 			continue;
 
-		bgp_clear(vty, bgp, afi, safi, clear_peer, BGP_CLEAR_SOFT_IN,
-			  neighbor);
+		ret = bgp_clear(bgp, afi, safi, clear_peer, BGP_CLEAR_SOFT_IN,
+			  neighbor, errmsg, sizeof(errmsg));
+		if (ret != NB_OK) {
+			vty_out(vty, "Error description: %s\n", errmsg);
+			return ret;
+		}
 	}
 
 	return ret;
@@ -3726,13 +3653,18 @@ DEFUN(no_bgp_llgr_stalepath_time, no_bgp_llgr_stalepath_time_cmd,
 	return CMD_SUCCESS;
 }
 
-static inline void bgp_initiate_graceful_shut_unshut(struct vty *vty,
-						     struct bgp *bgp)
+static inline int bgp_initiate_graceful_shut_unshut(struct bgp *bgp,
+						     char *errmsg,
+						     size_t errmsg_len)
 {
 	bgp_static_redo_import_check(bgp);
 	bgp_redistribute_redo(bgp);
-	bgp_clear_star_soft_out(vty, bgp->name);
-	bgp_clear_star_soft_in(vty, bgp->name);
+	if (bgp_clear_star_soft_out(bgp->name, errmsg, errmsg_len) < 0)
+		return -1;
+	if (bgp_clear_star_soft_in(bgp->name, errmsg, errmsg_len) < 0)
+		return -1;
+
+	return 0;
 }
 
 static int bgp_global_graceful_shutdown_config_vty(struct vty *vty)
@@ -3740,6 +3672,7 @@ static int bgp_global_graceful_shutdown_config_vty(struct vty *vty)
 	struct listnode *node, *nnode;
 	struct bgp *bgp;
 	bool vrf_cfg = false;
+	char errmsg[BUFSIZ] = {'\0'};
 
 	if (CHECK_FLAG(bm->flags, BM_FLAG_GRACEFUL_SHUTDOWN))
 		return CMD_SUCCESS;
@@ -3765,8 +3698,13 @@ static int bgp_global_graceful_shutdown_config_vty(struct vty *vty)
 	SET_FLAG(bm->flags, BM_FLAG_GRACEFUL_SHUTDOWN);
 
 	/* Initiate processing for all BGP instances. */
-	for (ALL_LIST_ELEMENTS(bm->bgp, node, nnode, bgp))
-		bgp_initiate_graceful_shut_unshut(vty, bgp);
+	for (ALL_LIST_ELEMENTS(bm->bgp, node, nnode, bgp)) {
+		if (bgp_initiate_graceful_shut_unshut(bgp, errmsg,
+						      sizeof(errmsg))
+		    < 0)
+			if (strlen(errmsg))
+				vty_out(vty, "%s\n", errmsg);
+	}
 
 	return CMD_SUCCESS;
 }
@@ -3775,6 +3713,7 @@ static int bgp_global_graceful_shutdown_deconfig_vty(struct vty *vty)
 {
 	struct listnode *node, *nnode;
 	struct bgp *bgp;
+	char errmsg[BUFSIZ] = {'\0'};
 
 	if (!CHECK_FLAG(bm->flags, BM_FLAG_GRACEFUL_SHUTDOWN))
 		return CMD_SUCCESS;
@@ -3783,8 +3722,13 @@ static int bgp_global_graceful_shutdown_deconfig_vty(struct vty *vty)
 	UNSET_FLAG(bm->flags, BM_FLAG_GRACEFUL_SHUTDOWN);
 
 	/* Initiate processing for all BGP instances. */
-	for (ALL_LIST_ELEMENTS(bm->bgp, node, nnode, bgp))
-		bgp_initiate_graceful_shut_unshut(vty, bgp);
+	for (ALL_LIST_ELEMENTS(bm->bgp, node, nnode, bgp)) {
+		if (bgp_initiate_graceful_shut_unshut(bgp, errmsg,
+						      sizeof(errmsg))
+		    < 0)
+			if (strlen(errmsg))
+				vty_out(vty, "%s\n", errmsg);
+	}
 
 	return CMD_SUCCESS;
 }
@@ -3801,6 +3745,9 @@ DEFUN (bgp_graceful_shutdown,
 
 	VTY_DECLVAR_CONTEXT(bgp, bgp);
 
+	char errmsg[BUFSIZ] = {'\0'};
+	int ret = CMD_SUCCESS;
+
 	/* if configured globally, per-instance config is not allowed */
 	if (CHECK_FLAG(bm->flags, BM_FLAG_GRACEFUL_SHUTDOWN)) {
 		vty_out(vty,
@@ -3810,10 +3757,14 @@ DEFUN (bgp_graceful_shutdown,
 
 	if (!CHECK_FLAG(bgp->flags, BGP_FLAG_GRACEFUL_SHUTDOWN)) {
 		SET_FLAG(bgp->flags, BGP_FLAG_GRACEFUL_SHUTDOWN);
-		bgp_initiate_graceful_shut_unshut(vty, bgp);
+		ret = bgp_initiate_graceful_shut_unshut(bgp, errmsg,
+							sizeof(errmsg));
+		if (ret != NB_OK)
+			vty_out(vty, "Error description: %s\n", errmsg);
+
 	}
 
-	return CMD_SUCCESS;
+	return ret;
 }
 
 DEFUN (no_bgp_graceful_shutdown,
@@ -3828,6 +3779,9 @@ DEFUN (no_bgp_graceful_shutdown,
 
 	VTY_DECLVAR_CONTEXT(bgp, bgp);
 
+	char errmsg[BUFSIZ] = {'\0'};
+	int ret = CMD_SUCCESS;
+
 	/* If configured globally, cannot remove from one bgp instance */
 	if (CHECK_FLAG(bm->flags, BM_FLAG_GRACEFUL_SHUTDOWN)) {
 		vty_out(vty,
@@ -3837,10 +3791,13 @@ DEFUN (no_bgp_graceful_shutdown,
 
 	if (CHECK_FLAG(bgp->flags, BGP_FLAG_GRACEFUL_SHUTDOWN)) {
 		UNSET_FLAG(bgp->flags, BGP_FLAG_GRACEFUL_SHUTDOWN);
-		bgp_initiate_graceful_shut_unshut(vty, bgp);
+		ret = bgp_initiate_graceful_shut_unshut(bgp, errmsg,
+							sizeof(errmsg));
+		if (ret != NB_OK)
+			vty_out(vty, "Error description: %s\n", errmsg);
 	}
 
-	return CMD_SUCCESS;
+	return ret;
 }
 
 /* "bgp fast-external-failover" configuration. */
@@ -4404,13 +4361,17 @@ DEFUN (bgp_default_local_preference,
 	VTY_DECLVAR_CONTEXT(bgp, bgp);
 	int idx_number = 3;
 	uint32_t local_pref;
+	char errmsg[BUFSIZ] = {'\0'};
+	int ret;
 
 	local_pref = strtoul(argv[idx_number]->arg, NULL, 10);
 
 	bgp_default_local_preference_set(bgp, local_pref);
-	bgp_clear_star_soft_in(vty, bgp->name);
+	ret = bgp_clear_star_soft_in(bgp->name, errmsg, sizeof(errmsg));
+	if (ret != NB_OK)
+		vty_out(vty, "Error description: %s\n", errmsg);
 
-	return CMD_SUCCESS;
+	return ret;
 }
 
 DEFUN (no_bgp_default_local_preference,
@@ -4423,10 +4384,16 @@ DEFUN (no_bgp_default_local_preference,
        "Configure default local preference value\n")
 {
 	VTY_DECLVAR_CONTEXT(bgp, bgp);
-	bgp_default_local_preference_unset(bgp);
-	bgp_clear_star_soft_in(vty, bgp->name);
 
-	return CMD_SUCCESS;
+	char errmsg[BUFSIZ] = {'\0'};
+	int ret;
+
+	bgp_default_local_preference_unset(bgp);
+	ret = bgp_clear_star_soft_in(bgp->name, errmsg, sizeof(errmsg));
+	if (ret != NB_OK)
+		vty_out(vty, "Error description: %s\n", errmsg);
+
+	return ret;
 }
 
 
@@ -4473,13 +4440,18 @@ DEFUN (bgp_rr_allow_outbound_policy,
 {
 	VTY_DECLVAR_CONTEXT(bgp, bgp);
 
+	char errmsg[BUFSIZ] = {'\0'};
+	int ret = CMD_SUCCESS;
+
 	if (!CHECK_FLAG(bgp->flags, BGP_FLAG_RR_ALLOW_OUTBOUND_POLICY)) {
 		SET_FLAG(bgp->flags, BGP_FLAG_RR_ALLOW_OUTBOUND_POLICY);
 		update_group_announce_rrclients(bgp);
-		bgp_clear_star_soft_out(vty, bgp->name);
+		ret = bgp_clear_star_soft_out(bgp->name, errmsg, sizeof(errmsg));
+		if (ret != NB_OK)
+			vty_out(vty, "Error description: %s\n", errmsg);
 	}
 
-	return CMD_SUCCESS;
+	return ret;
 }
 
 DEFUN (no_bgp_rr_allow_outbound_policy,
@@ -4492,13 +4464,18 @@ DEFUN (no_bgp_rr_allow_outbound_policy,
 {
 	VTY_DECLVAR_CONTEXT(bgp, bgp);
 
+	char errmsg[BUFSIZ] = {'\0'};
+	int ret = CMD_SUCCESS;
+
 	if (CHECK_FLAG(bgp->flags, BGP_FLAG_RR_ALLOW_OUTBOUND_POLICY)) {
 		UNSET_FLAG(bgp->flags, BGP_FLAG_RR_ALLOW_OUTBOUND_POLICY);
 		update_group_announce_rrclients(bgp);
-		bgp_clear_star_soft_out(vty, bgp->name);
+		ret = bgp_clear_star_soft_out(bgp->name, errmsg, sizeof(errmsg));
+		if (ret != NB_OK)
+			vty_out(vty, "Error description: %s\n", errmsg);
 	}
 
-	return CMD_SUCCESS;
+	return ret;
 }
 
 DEFUN (bgp_listen_limit,
@@ -4718,10 +4695,15 @@ DEFUN (bgp_disable_connected_route_check,
        "Disable checking if nexthop is connected on ebgp sessions\n")
 {
 	VTY_DECLVAR_CONTEXT(bgp, bgp);
+	char errmsg[BUFSIZ] = {'\0'};
+	int ret;
 	SET_FLAG(bgp->flags, BGP_FLAG_DISABLE_NH_CONNECTED_CHK);
-	bgp_clear_star_soft_in(vty, bgp->name);
+	ret = bgp_clear_star_soft_in(bgp->name, errmsg, sizeof(errmsg));
 
-	return CMD_SUCCESS;
+	if (ret != NB_OK)
+		vty_out(vty, "Error description: %s\n", errmsg);
+
+	return ret;
 }
 
 DEFUN (no_bgp_disable_connected_route_check,
@@ -4732,10 +4714,17 @@ DEFUN (no_bgp_disable_connected_route_check,
        "Disable checking if nexthop is connected on ebgp sessions\n")
 {
 	VTY_DECLVAR_CONTEXT(bgp, bgp);
-	UNSET_FLAG(bgp->flags, BGP_FLAG_DISABLE_NH_CONNECTED_CHK);
-	bgp_clear_star_soft_in(vty, bgp->name);
 
-	return CMD_SUCCESS;
+	char errmsg[BUFSIZ] = {'\0'};
+	int ret;
+
+	UNSET_FLAG(bgp->flags, BGP_FLAG_DISABLE_NH_CONNECTED_CHK);
+	ret = bgp_clear_star_soft_in(bgp->name, errmsg, sizeof(errmsg));
+
+	if (ret != NB_OK)
+		vty_out(vty, "Error description: %s\n", errmsg);
+
+	return ret;
 }
 
 
@@ -10965,6 +10954,8 @@ DEFUN (clear_ip_bgp_all,
 	char *clr_arg = NULL;
 
 	int idx = 0;
+	char errmsg[BUFSIZ] = {'\0'};
+	int ret;
 
 	/* clear [ip] bgp */
 	if (argv_find(argv, argc, "ip", &idx))
@@ -11033,7 +11024,12 @@ DEFUN (clear_ip_bgp_all,
 	} else
 		clr_type = BGP_CLEAR_SOFT_NONE;
 
-	return bgp_clear_vty(vty, vrf, afi, safi, clr_sort, clr_type, clr_arg);
+	ret = bgp_clear_vty(vrf, afi, safi, clr_sort, clr_type, clr_arg, errmsg,
+			    sizeof(errmsg));
+	if (ret != NB_OK)
+		vty_out(vty, "Error description: %s\n", errmsg);
+
+	return ret;
 }
 
 DEFUN (clear_ip_bgp_prefix,
@@ -18057,6 +18053,8 @@ DEFPY(bgp_retain_route_target, bgp_retain_route_target_cmd,
 {
 	bool check;
 	struct bgp *bgp = VTY_GET_CONTEXT(bgp);
+	char errmsg[BUFSIZ] = {'\0'};
+	int ret;
 
 	check = CHECK_FLAG(bgp->af_flags[bgp_node_afi(vty)][bgp_node_safi(vty)],
 			   BGP_VPNVX_RETAIN_ROUTE_TARGET_ALL);
@@ -18070,8 +18068,13 @@ DEFPY(bgp_retain_route_target, bgp_retain_route_target_cmd,
 						[bgp_node_safi(vty)],
 				   BGP_VPNVX_RETAIN_ROUTE_TARGET_ALL);
 		/* trigger a flush to re-sync with ADJ-RIB-in */
-		bgp_clear(vty, bgp, bgp_node_afi(vty), bgp_node_safi(vty),
-			  clear_all, BGP_CLEAR_SOFT_IN, NULL);
+		ret = bgp_clear(bgp, bgp_node_afi(vty), bgp_node_safi(vty),
+				clear_all, BGP_CLEAR_SOFT_IN, NULL, errmsg,
+				sizeof(errmsg));
+		if (ret != NB_OK)
+			vty_out(vty, "Error description: %s\n", errmsg);
+
+		return ret;
 	}
 	return CMD_SUCCESS;
 }
